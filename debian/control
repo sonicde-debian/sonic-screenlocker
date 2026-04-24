@@ -47,8 +47,8 @@ Depends: libsonicscreenlocker6 (= ${binary:Version}),
          systemsettings,
          ${misc:Depends},
          ${shlibs:Depends},
-Breaks: kde-config-kscreenlocker,
-Provides: kde-config-kscreenlocker,
+Conflicts: kde-config-kscreenlocker,
+Provides: kde-config-kscreenlocker (= ${binary:Version}),
 Description: KCM Module for sonic-screenlocker
  Sonic DE systemsettings module to configure sonic-screenlocker.
  .
@@ -70,8 +70,8 @@ Architecture: any
 Multi-Arch: same
 Depends: libsonicscreenlocker6 (= ${binary:Version}),
          ${misc:Depends},
-Breaks: kscreenlocker-dev,
-Provides: kscreenlocker-dev,
+Conflicts: kscreenlocker-dev,
+Provides: kscreenlocker-dev (= ${binary:Version}),
 Description: Development files for sonic-screenlocker
  Sonic DE systemsettings module to configure sonic-screenlocker.
  .
@@ -98,10 +98,11 @@ Suggests: libpam-fprintd,
           libpam-kwallet5,
           libpam-pkcs11,
           libpam-sss,
-Breaks: libkscreenlocker5,
+Conflicts: libkscreenlocker5,
         libkscreenlocker6,
 Replaces: libkscreenlocker5,
           libkscreenlocker6,
+Provides: libkscreenlocker6 (= ${binary:Version}),
 Description: Secure lock screen architecture
  Sonic DE systemsettings module to configure sonic-screenlocker.
  .
