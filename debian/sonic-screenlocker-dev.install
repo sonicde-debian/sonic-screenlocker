@@ -1,4 +1,4 @@
-usr/include/KScreenLocker/KScreenLocker/
+usr/include/
 usr/lib/*/cmake/KScreenLocker/
 usr/lib/*/cmake/ScreenSaverDBusInterface/
 usr/lib/*/libKScreenLocker.so
