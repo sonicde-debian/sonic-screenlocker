@@ -13,10 +13,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <config-kscreenlocker.h>
 #include <iostream>
-#include <unistd.h>
 #include <kscreenlocker_greet_logging.h>
-
-#include <LayerShellQt/Window>
+#include <unistd.h>
 
 // KDE
 #include <KAuthorized>
@@ -126,9 +124,12 @@ UnlockApp::UnlockApp(int &argc, char **argv)
     , m_testing(false)
     , m_ignoreRequests(false)
     , m_immediateLock(false)
+    , m_runtimeInitialized(false)
     , m_graceTime(0)
     , m_noLock(false)
     , m_shellIntegration(new ShellIntegration(this))
+    , m_lastCursorPos(QCursor::pos())
+    , m_lastCursorScreen(QGuiApplication::screenAt(m_lastCursorPos))
 {
     auto interactive = std::make_unique<PamAuthenticator>(QStringLiteral(KSCREENLOCKER_PAM_SERVICE), KUser().loginName());
     std::vector<std::unique_ptr<PamAuthenticator>> noninteractive;
@@ -155,8 +156,9 @@ UnlockApp::~UnlockApp()
 
 void UnlockApp::initialize()
 {
-    // set up the request ignore timeout, so that multiple requests to sleep/suspend/shutdown
-    // are not processed in quick (and confusing) succession)
+    // set up the request ignore timeout, so that multiple requests to
+    // sleep/suspend/shutdown are not processed in quick (and confusing)
+    // succession)
     m_resetRequestIgnoreTimer->setSingleShot(true);
     m_resetRequestIgnoreTimer->setInterval(2000);
     connect(m_resetRequestIgnoreTimer, &QTimer::timeout, this, &UnlockApp::resetRequestIgnore);
@@ -317,7 +319,8 @@ PlasmaQuick::QuickViewSharedEngine *UnlockApp::createViewForScreen(QScreen *scre
             std::cout << "Unlocked" << std::endl;
             // Quit without exit handlers
             // This is because:
-            // - the pam_unix backend will always report a failed login if we complete the converse method no matter what exit code we use
+            // - the pam_unix backend will always report a failed login if we complete
+            // the converse method no matter what exit code we use
             // - the fprintd backend sometimes takes a long time
             _exit(0);
         } else {
@@ -365,7 +368,8 @@ PlasmaQuick::QuickViewSharedEngine *UnlockApp::createViewForScreen(QScreen *scre
     }
 
     view->setSource(m_mainQmlPath);
-    // on error, load the fallback lockscreen to not lock the user out of the system
+    // on error, load the fallback lockscreen to not lock the user out of the
+    // system
     if (view->status() != QQmlComponent::Ready) {
         static const QUrl fallbackUrl(QUrl(QStringLiteral("qrc:/fallbacktheme/LockScreen.qml")));
 
@@ -378,7 +382,8 @@ PlasmaQuick::QuickViewSharedEngine *UnlockApp::createViewForScreen(QScreen *scre
         view->setSource(fallbackUrl);
 
         if (view->status() != QQmlComponent::Ready) {
-            qCWarning(KSCREENLOCKER_GREET) << "Failed to load the fallback lockscreen QML, something went really wrong! Terminating...";
+            qCWarning(KSCREENLOCKER_GREET) << "Failed to load the fallback lockscreen QML, something went "
+                                              "really wrong! Terminating...";
             for (const auto &error : view->errors()) {
                 qCWarning(KSCREENLOCKER_GREET) << error;
             }
@@ -387,8 +392,9 @@ PlasmaQuick::QuickViewSharedEngine *UnlockApp::createViewForScreen(QScreen *scre
     }
     view->setResizeMode(PlasmaQuick::QuickViewSharedEngine::SizeRootObjectToView);
 
-    // we need to set this wallpaper properties separately after the lockscreen QML is loaded
-    // this is because we need to anchor to the view that gets loaded
+    // we need to set this wallpaper properties separately after the lockscreen
+    // QML is loaded this is because we need to anchor to the view that gets
+    // loaded
     setWallpaperItemProperties(wallpaperObj, view);
 
     QQmlProperty lockProperty(view->rootObject(), QStringLiteral("locked"));
@@ -427,13 +433,17 @@ void UnlockApp::markViewsAsVisible(PlasmaQuick::QuickViewSharedEngine *view)
     showProperty.write(true);
     // random state update, actually rather required on init only
     QMetaObject::invokeMethod(this, "getFocus", Qt::QueuedConnection);
+    // reset focus to password field when view becomes visible
+    QMetaObject::invokeMethod(this, "resetFocus", Qt::QueuedConnection);
 
     auto mime1 = new QMimeData;
     // Effectively we want to clear the clipboard
     // however some clipboard managers (like klipper with it's default settings)
     // will prevent an empty clipboard
-    // we need some non-empty non-text mimeData to replace the clipboard so we don't leak real data to a user pasting into the text field
-    // as the clipboard is cleared on close, klipper will then put the original text back when we exit
+    // we need some non-empty non-text mimeData to replace the clipboard so we
+    // don't leak real data to a user pasting into the text field as the clipboard
+    // is cleared on close, klipper will then put the original text back when we
+    // exit
     mime1->setData(QStringLiteral("x-kde-lockscreen"), QByteArrayLiteral("empty"));
     // ownership is transferred
     QGuiApplication::clipboard()->setMimeData(mime1, QClipboard::Clipboard);
@@ -450,19 +460,29 @@ void UnlockApp::getFocus()
     if (!activeScreen) {
         return;
     }
-    // this loop is required to make the qml/graphicsscene properly handle the shared keyboard input
-    // ie. "type something into the box of every greeter"
+    // this loop is required to make the qml/graphicsscene properly handle the
+    // shared keyboard input ie. "type something into the box of every greeter"
     for (PlasmaQuick::QuickViewSharedEngine *view : std::as_const(m_views)) {
         if (!m_testing) {
             view->setKeyboardGrabEnabled(true); // TODO - check whether this still works in master!
         }
     }
     // activate window and grab input to be sure it really ends up there.
-    // focus setting is still required for proper internal QWidget state (and eg. visual reflection)
+    // focus setting is still required for proper internal QWidget state (and eg.
+    // visual reflection)
     if (!m_testing) {
         activeScreen->setKeyboardGrabEnabled(true); // TODO - check whether this still works in master!
     }
     activeScreen->requestActivate();
+}
+
+void UnlockApp::resetFocus()
+{
+    for (PlasmaQuick::QuickViewSharedEngine *view : std::as_const(m_views)) {
+        if (QObject *rootObject = view->rootObject()) {
+            QMetaObject::invokeMethod(rootObject, "resetFocus");
+        }
+    }
 }
 
 void UnlockApp::graceLockEnded()
@@ -588,6 +608,22 @@ bool UnlockApp::eventFilter(QObject *obj, QEvent *event)
         return false;
     }
 
+    if (event->type() == QEvent::MouseMove) {
+        QPoint currentPos = QCursor::pos();
+        QScreen *currentScreen = QGuiApplication::screenAt(currentPos);
+
+        // Check if cursor moved to a different screen
+        if (currentScreen != m_lastCursorScreen && currentScreen != nullptr) {
+            m_lastCursorScreen = currentScreen;
+            m_lastCursorPos = currentPos;
+            // Mouse moved to a new screen, reset focus on password field
+            QMetaObject::invokeMethod(this, "resetFocus", Qt::QueuedConnection);
+        } else {
+            m_lastCursorPos = currentPos;
+        }
+        return false;
+    }
+
     if (event->type() == QEvent::KeyPress) { // react if saver is visible
         return false; // we don't care
     } else if (event->type() == QEvent::KeyRelease) { // conditionally reshow the saver
@@ -678,4 +714,4 @@ void UnlockApp::updateCanHibernate()
     }
 }
 
-} // namespace
+} // namespace ScreenLocker
