@@ -2,15 +2,16 @@ cmake_minimum_required(VERSION 3.16)
 
 project(kscreenlocker)
 set(CMAKE_C_STANDARD 99)
-set(PROJECT_VERSION "6.6.3")
+set(PROJECT_VERSION "6.6.4")
 set(PROJECT_VERSION_MAJOR 6)
 
-set(PROJECT_DEP_VERSION "6.6.3")
+set(PROJECT_DEP_VERSION "6.6.4")
 set(QT_MIN_VERSION "6.10.0")
 set(KF6_MIN_VERSION "6.22.0")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(ECM ${KF6_MIN_VERSION} REQUIRED NO_MODULE)
 set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake ${ECM_MODULE_PATH} )
@@ -72,9 +73,7 @@ set_package_properties(X11 PROPERTIES DESCRIPTION "X11 libraries"
 
 find_package(XCB MODULE REQUIRED COMPONENTS XCB KEYSYMS XTEST)
 set_package_properties(XCB PROPERTIES TYPE REQUIRED)
-add_feature_info("XInput" X11_Xinput_FOUND "Required for grabbing XInput2 devices in the screen locker")
 
-find_package(LayerShellQt REQUIRED)
 find_package(KF6Screen REQUIRED)
 
 find_package(loginctl)
@@ -214,9 +213,7 @@ target_compile_definitions(KScreenLocker PRIVATE
     KSCREENLOCKER_GREET_BIN_REL="${kscreenlocker_greet_bin_rel}"
 )
 
-if (X11_Xinput_FOUND)
-    target_link_libraries(KScreenLocker PRIVATE X11::Xi)
-endif()
+target_link_libraries(KScreenLocker PRIVATE X11::Xi)
 
 target_include_directories(KScreenLocker INTERFACE "$<INSTALL_INTERFACE:${KSLD_INCLUDEDIR}>")
 
@@ -227,6 +224,7 @@ add_library(PW::KScreenLocker ALIAS KScreenLocker)
 
 # add clang-format target for all our real source files
 file(GLOB_RECURSE ALL_CLANG_FORMAT_SOURCE_FILES *.cpp *.h *.c)
+list(FILTER ALL_CLANG_FORMAT_SOURCE_FILES EXCLUDE REGEX ".ccls-cache")
 kde_clang_format(${ALL_CLANG_FORMAT_SOURCE_FILES})
 kde_configure_git_pre_commit_hook(CHECKS CLANG_FORMAT)
 
