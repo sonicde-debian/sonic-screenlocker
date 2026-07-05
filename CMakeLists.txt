@@ -2,10 +2,10 @@ cmake_minimum_required(VERSION 3.16)
 
 project(kscreenlocker)
 set(CMAKE_C_STANDARD 99)
-set(PROJECT_VERSION "6.6.4")
+set(PROJECT_VERSION "6.6.5")
 set(PROJECT_VERSION_MAJOR 6)
 
-set(PROJECT_DEP_VERSION "6.6.4")
+set(PROJECT_DEP_VERSION "6.6.5")
 set(QT_MIN_VERSION "6.10.0")
 set(KF6_MIN_VERSION "6.22.0")
 
