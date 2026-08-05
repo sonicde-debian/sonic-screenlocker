@@ -20,6 +20,7 @@ class Authenticator;
 struct org_kde_ksld;
 
 class PamAuthenticators;
+class GreeterIpcClient;
 
 namespace ScreenLocker
 {
@@ -48,7 +49,6 @@ public:
 public Q_SLOTS:
     void osdProgress(const QString &icon, int percent, const int maximumPercent, const QString &additionalText);
     void osdText(const QString &icon, const QString &additionalText);
-    void resetFocus();
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
@@ -69,6 +69,12 @@ private:
     void setWallpaperItemProperties(PlasmaQuick::SharedQmlEngine *wallpaperObject, PlasmaQuick::QuickViewSharedEngine *view);
     void screenGeometryChanged(QScreen *screen, const QRect &geo);
     QWindow *getActiveScreen();
+    void logViewHealth();
+
+    // IPC communication methods with KSldApp
+    void registerViewWithKsld(PlasmaQuick::QuickViewSharedEngine *view);
+    void unregisterViewFromKsld(PlasmaQuick::QuickViewSharedEngine *view);
+    void notifyAuthenticationSuccess();
 
     QString m_packageName;
     QUrl m_mainQmlPath;
@@ -87,12 +93,10 @@ private:
     bool m_canHibernate = false;
     QString m_userName, m_userImage;
 
-    org_kde_ksld *m_ksldInterface = nullptr;
-
     KPackage::Package m_wallpaperPackage;
     ShellIntegration *m_shellIntegration;
 
-    QPoint m_lastCursorPos;
-    QScreen *m_lastCursorScreen = nullptr;
+    // Custom IPC client for communicating with KSldApp
+    GreeterIpcClient *m_ipcClient = nullptr;
 };
 } // namespace

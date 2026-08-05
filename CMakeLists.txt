@@ -2,12 +2,12 @@ cmake_minimum_required(VERSION 3.16)
 
 project(kscreenlocker)
 set(CMAKE_C_STANDARD 99)
-set(PROJECT_VERSION "6.6.5")
+set(PROJECT_VERSION "6.7.2")
 set(PROJECT_VERSION_MAJOR 6)
 
-set(PROJECT_DEP_VERSION "6.6.5")
+set(PROJECT_DEP_VERSION "6.7.0")
 set(QT_MIN_VERSION "6.10.0")
-set(KF6_MIN_VERSION "6.22.0")
+set(KF6_MIN_VERSION "6.26.0")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -140,8 +140,8 @@ set(KSLD_INCLUDEDIR "${KDE_INSTALL_INCLUDEDIR}/KScreenLocker")
 
 include(ECMQtDeclareLoggingCategory)
 
-ecm_set_disabled_deprecation_versions(QT 6.9.0
-    KF 6.16.0
+ecm_set_disabled_deprecation_versions(QT 6.11.0
+    KF 6.23.0
 )
 
 add_subdirectory(greeter)
@@ -162,6 +162,7 @@ set(ksld_SRCS
    x11locker.cpp
    logind.cpp
    powermanagement_inhibition.cpp
+   greeteripcserver.cpp
    abstractlocker.h
    ksldapp.h
    interface.h
@@ -169,6 +170,7 @@ set(ksld_SRCS
    x11locker.h
    logind.h
    powermanagement_inhibition.h
+   greeteripcserver.h
 )
 
 ecm_qt_declare_logging_category(ksld_SRCS
@@ -298,3 +300,5 @@ endif()
 ki18n_install(po)
 
 feature_summary(WHAT ALL FATAL_ON_MISSING_REQUIRED_PACKAGES)
+
+

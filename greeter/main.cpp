@@ -15,6 +15,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <signal.h>
 
 #include "greeterapp.h"
+#include "messagehandler.h"
 
 #include <config-kscreenlocker.h>
 #include <kscreenlocker_greet_logging.h>
@@ -55,6 +56,11 @@ static void signalHandler(int signum)
     }
 }
 
+static void GreeterMessageHandler(QtMsgType type, const QMessageLogContext &, const QString &msg)
+{
+    messageHandler(type, QStringLiteral("KSCREENLOCKER_GREET"), msg);
+}
+
 int main(int argc, char *argv[])
 {
     sigset_t blockedSignals;
@@ -71,6 +77,8 @@ int main(int argc, char *argv[])
     int mode = PROC_TRACE_CTL_DISABLE;
     procctl(P_PID, getpid(), PROC_TRACE_CTL, &mode);
 #endif
+
+    qInstallMessageHandler(GreeterMessageHandler);
 
     qCDebug(KSCREENLOCKER_GREET) << "Greeter is starting up.";
 
@@ -177,6 +185,7 @@ int main(int argc, char *argv[])
     // This allow ksmserver to know when the application has actually finished
     // setting itself up. Crucial for blocking until it is ready, ensuring locking
     // happens before sleep, e.g.
+    // TODO: Replace this stdout communication with D-Bus or another alternative (see https://github.com/Sonic-DE/sonic/issues/14)
     std::cout << "Locked at " << QDateTime::currentDateTime().toSecsSinceEpoch() << std::endl;
 
     return app.exec();

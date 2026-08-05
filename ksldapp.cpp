@@ -8,9 +8,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
 */
 #include "ksldapp.h"
 #include "globalaccel.h"
+#include "greeteripcserver.h"
 #include "interface.h"
 #include "kscreensaversettings.h"
 #include "logind.h"
+#include "messagehandler.h"
 #include "powermanagement_inhibition.h"
 #include "x11locker.h"
 
@@ -28,6 +30,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 // Qt
 #include <QAction>
+#include <QDBusConnection>
+#include <QDBusInterface>
 #include <QFile>
 #include <QKeyEvent>
 #include <QProcess>
@@ -152,17 +156,47 @@ void KSldApp::initializeX11()
     XSetScreenSaver(X11Info::display(), 0, s_XInterval, s_XBlanking, s_XExposures);
 }
 
+static void KSldMessageHandler(QtMsgType type, const QMessageLogContext &, const QString &msg)
+{
+    messageHandler(type, QStringLiteral("KSLDAPP"), msg);
+}
+
 void KSldApp::initialize()
 {
+    qInstallMessageHandler(KSldMessageHandler);
+
     qCDebug(KSCREENLOCKER) << "Initializing";
 
     m_requirePassword = KScreenSaverSettings::requirePassword();
 
     initializeX11();
 
-    // Global keys
+    // Initialize custom IPC server for greeter communication
+    m_ipcServer = new GreeterIpcServer(this);
+    if (!m_ipcServer->initialize()) {
+        qCWarning(KSCREENLOCKER) << "Failed to initialize IPC server";
+        delete m_ipcServer;
+        m_ipcServer = nullptr;
+    } else {
+        // Connect IPC server signals to KSldApp slots
+        connect(m_ipcServer, &GreeterIpcServer::greeterWindowRegistered, this, &KSldApp::registerGreeterWindow);
+        connect(m_ipcServer, &GreeterIpcServer::greeterWindowUnregistered, this, &KSldApp::unregisterGreeterWindow);
+        connect(m_ipcServer, &GreeterIpcServer::greeterAuthenticationSuccess, this, &KSldApp::greeterAuthenticationSuccess);
+        connect(m_ipcServer, &GreeterIpcServer::greeterGetFocusRequested, this, &KSldApp::greeterGetFocus);
+
+        // Set environment variable for greeter to find the IPC socket
+        m_greeterEnv.insert(QStringLiteral("KSCREENLOCKER_IPC_SOCKET"), GreeterIpcServer::socketName());
+    }
+
+    // Global keys - only register if kglobalaccel service is available
     if (KAuthorized::authorizeAction(QStringLiteral("lock_screen"))) {
-        qCDebug(KSCREENLOCKER) << "Configuring Lock Action";
+        // Check if kglobalaccel service is available
+        QDBusInterface kglobalaccelInterface(QStringLiteral("org.kde.kglobalaccel"),
+                                             QStringLiteral("/kglobalaccel"),
+                                             QStringLiteral("org.kde.KGlobalAccel"),
+                                             QDBusConnection::sessionBus());
+        bool kglobalaccelAvailable = kglobalaccelInterface.isValid();
+
         QAction *a = new QAction(this);
         a->setObjectName(QStringLiteral("Lock Session"));
         // The following properties are set manually because we do not depend
@@ -170,7 +204,11 @@ void KSldApp::initialize()
         a->setProperty("componentDisplayName", i18nc("Name of a category in System Settings' Shortcuts KCM; match it exactly", "Session Management"));
         a->setProperty("componentName", QStringLiteral("ksmserver"));
         a->setText(i18n("Lock Session"));
-        KGlobalAccel::self()->setGlobalShortcut(a, KScreenSaverSettings::defaultShortcuts());
+
+        if (kglobalaccelAvailable) {
+            KGlobalAccel::self()->setGlobalShortcut(a, KScreenSaverSettings::defaultShortcuts());
+        }
+
         connect(a, &QAction::triggered, this, [this]() {
             qCDebug(KSCREENLOCKER) << "Locking session due to global shortcut";
             const EstablishLock lockType = m_requirePassword ? EstablishLock::Immediate : EstablishLock::Delayed;
@@ -212,14 +250,7 @@ void KSldApp::initialize()
 
     m_lockProcess = new QProcess();
     m_lockProcess->setProcessChannelMode(QProcess::ForwardedErrorChannel);
-    m_lockProcess->setReadChannel(QProcess::StandardOutput);
     auto finishedSignal = static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished);
-    connect(m_lockProcess, &QProcess::readyRead, this, [this] {
-        const auto str = QString::fromLocal8Bit(m_lockProcess->readLine());
-        if (str == QStringLiteral("Unlocked\n")) {
-            lockProcessRequestedUnlock();
-        }
-    });
     connect(m_lockProcess, finishedSignal, this, [this](int exitCode, QProcess::ExitStatus exitStatus) {
         qCDebug(KSCREENLOCKER) << "Greeter process exitted with status:" << exitStatus << "exit code:" << exitCode;
 
@@ -374,6 +405,32 @@ void KSldApp::lockProcessRequestedUnlock()
     s_logindExit = false;
     s_lockProcessRequestedExit = true;
     doUnlock();
+}
+
+void KSldApp::registerGreeterWindow(uint winId, const QString &screenName)
+{
+    // Store the window ID for later grab management
+    m_greeterWindows.insert(winId, screenName);
+    // Tell the lock window to allow this window
+    if (m_lockWindow) {
+        m_lockWindow->addAllowedWindow(winId);
+    }
+}
+
+void KSldApp::unregisterGreeterWindow(uint winId)
+{
+    m_greeterWindows.remove(winId);
+}
+
+void KSldApp::greeterAuthenticationSuccess()
+{
+    lockProcessRequestedUnlock();
+}
+
+void KSldApp::greeterGetFocus(const QString &screenName)
+{
+    // Focus is managed by the greeter itself, but we log it here
+    Q_UNUSED(screenName);
 }
 
 void KSldApp::configure()
@@ -706,7 +763,6 @@ uint KSldApp::activeTime() const
 
 bool KSldApp::isGraceTime() const
 {
-    qCDebug(KSCREENLOCKER) << "Checking if in grace time: " << m_inGraceTime;
     return m_inGraceTime;
 }
 

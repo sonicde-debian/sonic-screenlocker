@@ -5,6 +5,7 @@ SPDX-FileCopyrightText: 2011 Martin Gräßlin <mgraesslin@kde.org>
 SPDX-License-Identifier: GPL-2.0-or-later
 */
 #include "greeterapp.h"
+#include "greeteripcclient.h"
 #include "kscreensaversettingsbase.h"
 #include "noaccessnetworkaccessmanagerfactory.h"
 #include "powermanagement.h"
@@ -31,6 +32,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
 // Plasma
 #include <KPackage/Package>
 #include <KPackage/PackageLoader>
+
+#include <Plasma/Plasma>
+
 // Qt
 #include <QAbstractNativeEventFilter>
 #include <QClipboard>
@@ -55,6 +59,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 #include <fixx11h.h>
 //
 #include <xcb/xcb.h>
+#include <xcb/xcb_event.h>
 
 #include "pamauthenticator.h"
 #include "pamauthenticators.h"
@@ -108,11 +113,8 @@ public:
         if (eventType != QByteArrayLiteral("xcb_generic_event_t")) {
             return false;
         }
-        xcb_generic_event_t *event = reinterpret_cast<xcb_generic_event_t *>(message);
-        if ((event->response_type & ~0x80) == XCB_FOCUS_OUT) {
-            return true;
-        }
-        return false;
+        auto event = static_cast<xcb_generic_event_t *>(message);
+        return XCB_EVENT_RESPONSE_TYPE(event) == XCB_FOCUS_OUT;
     }
 };
 
@@ -128,8 +130,6 @@ UnlockApp::UnlockApp(int &argc, char **argv)
     , m_graceTime(0)
     , m_noLock(false)
     , m_shellIntegration(new ShellIntegration(this))
-    , m_lastCursorPos(QCursor::pos())
-    , m_lastCursorScreen(QGuiApplication::screenAt(m_lastCursorPos))
 {
     auto interactive = std::make_unique<PamAuthenticator>(QStringLiteral(KSCREENLOCKER_PAM_SERVICE), KUser().loginName());
     std::vector<std::unique_ptr<PamAuthenticator>> noninteractive;
@@ -140,6 +140,44 @@ UnlockApp::UnlockApp(int &argc, char **argv)
     m_authenticators = new PamAuthenticators(std::move(interactive), std::move(noninteractive), this);
     initialize();
     installNativeEventFilter(new FocusOutEventFilter);
+
+    // Initialize custom IPC client for communication with KSldApp
+    m_ipcClient = new GreeterIpcClient(this);
+    m_ipcClient->connectToHost();
+    connect(m_ipcClient, &GreeterIpcClient::connected, this, []() {
+        qCDebug(KSCREENLOCKER_GREET) << "Connected to KSldApp via custom IPC";
+    });
+    connect(m_ipcClient, &GreeterIpcClient::disconnected, this, []() {
+        qCDebug(KSCREENLOCKER_GREET) << "Disconnected from KSldApp via custom IPC";
+    });
+    connect(m_ipcClient, &GreeterIpcClient::connectionError, this, [](const QString &error) {
+        qCCritical(KSCREENLOCKER_GREET) << "Custom IPC connection error:" << error;
+    });
+
+    // Connect to screenAdded to handle screens coming back after power cycle
+    connect(this, &QGuiApplication::screenAdded, this, [this](QScreen *screen) {
+        if (screen->geometry().isNull()) {
+            connect(screen, &QScreen::geometryChanged, this, [this, screen]() {
+                if (!screen->geometry().isNull()) {
+                    handleScreen(screen);
+                }
+            });
+            return;
+        }
+        handleScreen(screen);
+    });
+
+    // Connect to screenRemoved to clean up views referencing the removed screen
+    connect(this, &QGuiApplication::screenRemoved, this, [this](QScreen *screen) {
+        // Find and remove the view for this screen
+        for (auto *view : std::as_const(m_views)) {
+            if (view->screen() == screen) {
+                m_views.removeOne(view);
+                delete view;
+                break;
+            }
+        }
+    });
 }
 
 UnlockApp::~UnlockApp()
@@ -265,23 +303,54 @@ void UnlockApp::initialViewSetup()
     for (QScreen *screen : screens()) {
         handleScreen(screen);
     }
-    connect(this, &UnlockApp::screenAdded, this, &UnlockApp::handleScreen);
 }
 
 void UnlockApp::handleScreen(QScreen *screen)
 {
     if (screen->geometry().isNull()) {
+        qCWarning(KSCREENLOCKER_GREET) << "handleScreen: Screen" << screen->name() << "has null geometry, skipping view creation."
+                                       << "This may cause display issues after resume from power saving.";
+        // Connect to geometryChanged to retry when the screen gets valid geometry
+        connect(screen, &QScreen::geometryChanged, this, [this, screen]() {
+            if (!screen->geometry().isNull()) {
+                // Disconnect this one-shot handler
+                QObject::disconnect(sender());
+                handleScreen(screen);
+            }
+        });
         return;
     }
-    auto *view = createViewForScreen(screen);
-    m_views << view;
-    connect(this, &QGuiApplication::screenRemoved, view, [this, view, screen](QScreen *removedScreen) {
-        if (removedScreen != screen) {
+
+    // Check if we already have a view for this screen - avoid duplicates
+    for (auto *existingView : std::as_const(m_views)) {
+        if (existingView->screen() == screen) {
+            // Update geometry if it changed
+            if (existingView->geometry() != screen->geometry()) {
+                existingView->setGeometry(screen->geometry());
+                existingView->raise();
+                existingView->show();
+            }
             return;
         }
-        m_views.removeOne(view);
-        delete view;
-    });
+    }
+
+    auto *view = createViewForScreen(screen);
+    if (view) {
+        m_views << view;
+
+        // Register view with KSldApp via D-Bus
+        registerViewWithKsld(view);
+
+        // Connect to view destruction to detect when views become invalid
+        connect(view, &QObject::destroyed, this, [this, screenName = screen->name()](QObject *obj) {
+            // Unregister from KSldApp via D-Bus
+            unregisterViewFromKsld(qobject_cast<PlasmaQuick::QuickViewSharedEngine *>(obj));
+            // Remove from list if still present
+            m_views.removeOne(qobject_cast<PlasmaQuick::QuickViewSharedEngine *>(obj));
+        });
+    } else {
+        qCWarning(KSCREENLOCKER_GREET) << "createViewForScreen returned nullptr for screen:" << screen->name();
+    }
 }
 
 PlasmaQuick::QuickViewSharedEngine *UnlockApp::createViewForScreen(QScreen *screen)
@@ -297,7 +366,7 @@ PlasmaQuick::QuickViewSharedEngine *UnlockApp::createViewForScreen(QScreen *scre
         view->setGeometry(geo);
     });
 
-    view->engine()->setProperty("_kirigamiTheme", QStringLiteral("KirigamiPlasmaStyle"));
+    Plasma::setupPlasmaStyle(view->engine().get());
     view->engine()->rootContext()->setContextObject(new KLocalizedQmlContext(view->engine().get()));
     auto oldFactory = view->engine()->networkAccessManagerFactory();
     view->engine()->setNetworkAccessManagerFactory(nullptr);
@@ -308,7 +377,7 @@ PlasmaQuick::QuickViewSharedEngine *UnlockApp::createViewForScreen(QScreen *scre
         view->setFlags(Qt::X11BypassWindowManagerHint);
     }
 
-    if (m_ksldInterface) {
+    if (m_ipcClient) {
         view->create();
     }
 
@@ -316,7 +385,8 @@ PlasmaQuick::QuickViewSharedEngine *UnlockApp::createViewForScreen(QScreen *scre
     QQmlContext *context = view->engine()->rootContext();
     connect(view->engine().get(), &QQmlEngine::quit, this, [this]() {
         if (m_authenticators->isUnlocked()) {
-            std::cout << "Unlocked" << std::endl;
+            // Notify KSldApp via D-Bus
+            notifyAuthenticationSuccess();
             // Quit without exit handlers
             // This is because:
             // - the pam_unix backend will always report a failed login if we complete
@@ -335,26 +405,32 @@ PlasmaQuick::QuickViewSharedEngine *UnlockApp::createViewForScreen(QScreen *scre
     context->setContextProperty(QStringLiteral("org_kde_plasma_screenlocker_greeter_view"), view);
     context->setContextProperty(QStringLiteral("config"), m_shellIntegration->configuration());
 
-    const QString xmlPath = m_wallpaperPackage.filePath(QByteArrayLiteral("config"), QStringLiteral("main.xml"));
-
     const KConfigGroup cfg = KScreenSaverSettingsBase::self()
                                  ->sharedConfig()
                                  ->group(QStringLiteral("Greeter"))
                                  .group(QStringLiteral("Wallpaper"))
                                  .group(KScreenSaverSettingsBase::self()->wallpaperPluginId());
 
-    KConfigLoader *configLoader;
-    if (xmlPath.isEmpty()) {
-        configLoader = new KConfigLoader(cfg, nullptr, this);
-    } else {
+    auto configLoader = [&] {
+        const QString xmlPath = m_wallpaperPackage.filePath(QByteArrayLiteral("config"), QStringLiteral("main.xml"));
+        if (xmlPath.isEmpty()) {
+            return new KConfigLoader(cfg, nullptr, this);
+        }
         QFile file(xmlPath);
-        configLoader = new KConfigLoader(cfg, &file, this);
-    }
+        return new KConfigLoader(cfg, &file, this);
+    }();
 
     KConfigPropertyMap *config = new KConfigPropertyMap(configLoader, this);
     // potd (picture of the day) is using a kded to monitor changes and
     // cache data for the lockscreen. Let's notify it.
     config->setNotify(true);
+
+    // keep lockscreen animated wallpapers from pausing
+    if (KScreenSaverSettingsBase::self()->wallpaperPluginId() == QStringLiteral("org.kde.image")) {
+        if (!cfg.hasKey("ForceImageAnimation")) {
+            config->insert(QStringLiteral("ForceImageAnimation"), true);
+        }
+    }
 
     auto wallpaperObj = loadWallpaperPlugin(view);
     if (auto object = view->property("wallpaperGraphicsObject").value<PlasmaQuick::SharedQmlEngine *>()) {
@@ -429,12 +505,14 @@ PlasmaQuick::QuickViewSharedEngine *UnlockApp::createViewForScreen(QScreen *scre
 
 void UnlockApp::markViewsAsVisible(PlasmaQuick::QuickViewSharedEngine *view)
 {
-    QQmlProperty showProperty(view->rootObject(), QStringLiteral("viewVisible"));
-    showProperty.write(true);
+    if (view->rootObject()) {
+        QQmlProperty showProperty(view->rootObject(), QStringLiteral("viewVisible"));
+        showProperty.write(true);
+    } else {
+        qCWarning(KSCREENLOCKER_GREET) << "  rootObject is NULL!";
+    }
     // random state update, actually rather required on init only
     QMetaObject::invokeMethod(this, "getFocus", Qt::QueuedConnection);
-    // reset focus to password field when view becomes visible
-    QMetaObject::invokeMethod(this, "resetFocus", Qt::QueuedConnection);
 
     auto mime1 = new QMimeData;
     // Effectively we want to clear the clipboard
@@ -463,26 +541,49 @@ void UnlockApp::getFocus()
     // this loop is required to make the qml/graphicsscene properly handle the
     // shared keyboard input ie. "type something into the box of every greeter"
     for (PlasmaQuick::QuickViewSharedEngine *view : std::as_const(m_views)) {
+        // Raise all views to ensure they are on top after screen wake
+        view->raise();
         if (!m_testing) {
-            view->setKeyboardGrabEnabled(true); // TODO - check whether this still works in master!
+            view->setKeyboardGrabEnabled(true);
         }
     }
     // activate window and grab input to be sure it really ends up there.
     // focus setting is still required for proper internal QWidget state (and eg.
     // visual reflection)
     if (!m_testing) {
-        activeScreen->setKeyboardGrabEnabled(true); // TODO - check whether this still works in master!
+        activeScreen->setKeyboardGrabEnabled(true);
     }
     activeScreen->requestActivate();
 }
 
-void UnlockApp::resetFocus()
+void UnlockApp::registerViewWithKsld(PlasmaQuick::QuickViewSharedEngine *view)
 {
-    for (PlasmaQuick::QuickViewSharedEngine *view : std::as_const(m_views)) {
-        if (QObject *rootObject = view->rootObject()) {
-            QMetaObject::invokeMethod(rootObject, "resetFocus");
-        }
+    if (!view) {
+        qCWarning(KSCREENLOCKER_GREET) << "registerViewWithKsld: view is null, skipping";
+        return;
     }
+    if (!m_ipcClient) {
+        qCWarning(KSCREENLOCKER_GREET) << "registerViewWithKsld: IPC client not available, skipping registration for winId=" << view->winId();
+        return;
+    }
+    QString screenName = view->screen() ? view->screen()->name() : QString();
+    m_ipcClient->registerWindow(view->winId(), screenName);
+}
+
+void UnlockApp::unregisterViewFromKsld(PlasmaQuick::QuickViewSharedEngine *view)
+{
+    if (!view || !m_ipcClient) {
+        return;
+    }
+    m_ipcClient->unregisterWindow(view->winId());
+}
+
+void UnlockApp::notifyAuthenticationSuccess()
+{
+    if (!m_ipcClient) {
+        return;
+    }
+    m_ipcClient->reportAuthenticationSuccess();
 }
 
 void UnlockApp::graceLockEnded()
@@ -604,22 +705,6 @@ bool UnlockApp::eventFilter(QObject *obj, QEvent *event)
     if (event->type() == QEvent::MouseButtonPress) {
         if (getActiveScreen()) {
             getActiveScreen()->requestActivate();
-        }
-        return false;
-    }
-
-    if (event->type() == QEvent::MouseMove) {
-        QPoint currentPos = QCursor::pos();
-        QScreen *currentScreen = QGuiApplication::screenAt(currentPos);
-
-        // Check if cursor moved to a different screen
-        if (currentScreen != m_lastCursorScreen && currentScreen != nullptr) {
-            m_lastCursorScreen = currentScreen;
-            m_lastCursorPos = currentPos;
-            // Mouse moved to a new screen, reset focus on password field
-            QMetaObject::invokeMethod(this, "resetFocus", Qt::QueuedConnection);
-        } else {
-            m_lastCursorPos = currentPos;
         }
         return false;
     }
